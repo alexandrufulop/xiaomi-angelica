@@ -87,68 +87,6 @@ set_halium_version_properties() {
 	chmod 600 $android_data/property/persist.halium*
 }
 
-mount_android_partitions() {
-	fstab=$1
-	mount_root=$2
-	real_userdata=$3
-
-	tell_kmsg "checking fstab $fstab for additional mount points"
-
-	# On systems with A/B partition layout, current slot is provided via cmdline parameter.
-	ab_slot_suffix=$(grep -o 'androidboot\.slot_suffix=..' /proc/cmdline |  cut -d "=" -f2)
-	[ ! -z "$ab_slot_suffix" ] && tell_kmsg "A/B slot system detected! Slot suffix is $ab_slot_suffix"
-
-	cat ${fstab} | while read line; do
-		set -- $line
-
-		# stop processing if we hit the "#endhalium" comment in the file
-		echo $1 | egrep -q "^#endhalium" && break
-
-		# Skip any unwanted entry
-		echo $1 | egrep -q "^#" && continue
-		([ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]) && continue
-		([ "$2" = "/system" ] || [ "$2" = "/data" ] || [ "$2" = "/" ]) && continue
-
-		label=$(echo $1 | awk -F/ '{print $NF}')
-		[ -z "$label" ] && continue
-
-		tell_kmsg "checking mount label $label"
-
-		# In case fstab provides /dev/mmcblk0p* lines
-		path="/dev/$label"
-		for dir in by-partlabel by-name by-label by-path by-uuid by-partuuid by-id; do
-			# On A/B systems not all of the partitions are duplicated, so we have to check with and without suffix
-			if [ -e "/dev/disk/$dir/$label$ab_slot_suffix" ]; then
-				path="/dev/disk/$dir/$label$ab_slot_suffix"
-				break
-			elif [ -e "/dev/disk/$dir/$label" ]; then
-				path="/dev/disk/$dir/$label"
-				break
-			fi
-		done
-
-		[ ! -e "$path" ] && continue
-
-		mkdir -p ${mount_root}/$2
-		tell_kmsg "mounting $path as ${mount_root}/$2"
-		mount $path ${mount_root}/$2 -t $3 -o $4
-	done
-
-	# Provide a bind mount from /cache to /userdata/cache on systems without a dedicated cache partition
-	if [ ! -e ${mount_root}/cache ]; then
-		if [ ! -d ${real_userdata}/cache ]; then
-			mkdir ${real_userdata}/cache
-		fi
-		mkdir ${mount_root}/cache
-		mount -o bind ${real_userdata}/cache ${mount_root}/cache
-	fi
-
-	# Create an appropriate symlink for vendor files
-	if [ ! -e ${mount_root}/vendor ]; then
-		ln -sf system/vendor ${mount_root}/vendor
-	fi
-}
-
 mount_halium_overlay() {
 	source=$1
 	target=$2
@@ -558,8 +496,7 @@ mountroot() {
 	[ $ANDROID_IMAGE_MODE = "system" ] && extract_android_ramdisk
 
 	if [ -e $imagefile ] || [ -n "$_syspart" ]; then
-		# Regular image boot
-		tell_kmsg "Normal boot"
+		tell_kmsg "Initializing rootfs"
 
 		mount --move /halium-system ${rootmnt}
 		mkdir -p ${rootmnt}/android
@@ -588,8 +525,14 @@ mountroot() {
 
 		process_bind_mounts
 
-		# Mount all the Android partitions
-		mount_android_partitions "${rootmnt}/var/lib/lxc/android/rootfs/fstab*" ${rootmnt}/android ${rootmnt}/userdata
+		# Provide a bind mount from /cache to /userdata/cache on systems without a dedicated cache partition
+		if [ ! -e ${rootmnt}/android/cache ] || ! grep -q "${rootmnt}/android/cache" /proc/mounts; then
+			if [ ! -d ${rootmnt}/userdata/cache ]; then
+				mkdir ${rootmnt}/userdata/cache
+			fi
+			mkdir ${rootmnt}/android/cache
+			mount -o bind ${rootmnt}/userdata/cache ${rootmnt}/android/cache
+		fi
 
 		# system is a special case
 		tell_kmsg "moving Android system to /android/system"
